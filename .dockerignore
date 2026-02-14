@@ -1,0 +1,15 @@
+node_modules
+**/node_modules
+
+.venv
+**/.venv
+
+.git
+
+__pycache__
+**/__pycache__
+
+.DS_Store
+**/.DS_Store
+
+data

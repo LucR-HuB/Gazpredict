@@ -1,0 +1,21 @@
+[
+  "hdd",
+  "wind_weighted",
+  "hdd_wind",
+  "cold_weekend",
+  "stock_twh_lag_1",
+  "stock_fill_rate",
+  "net_injection_lag_1",
+  "net_injection_lag_7",
+  "hdd_roll_mean_7",
+  "wind_roll_mean_7",
+  "day_sin",
+  "day_cos",
+  "day_of_week",
+  "is_weekend",
+  "country_BE",
+  "country_DE",
+  "country_FR",
+  "country_IT",
+  "country_NL"
+]
