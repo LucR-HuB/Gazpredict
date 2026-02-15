@@ -13,12 +13,14 @@ except ImportError:
     from weather_client import WeatherClient
 
 try:
+    from backend.config.stations import WEATHER_GRID
     from backend.src.config.database import engine, init_db
     from backend.src.models.weather import WeatherData
 except ImportError:
     project_root = Path(__file__).resolve().parents[3]
     if str(project_root) not in sys.path:
         sys.path.append(str(project_root))
+    from backend.config.stations import WEATHER_GRID
     from backend.src.config.database import engine, init_db
     from backend.src.models.weather import WeatherData
 
@@ -57,26 +59,42 @@ def main() -> None:
     yesterday = today - datetime.timedelta(days=1)
     forecast_end = today + datetime.timedelta(days=client.FORECAST_HORIZON_DAYS)
 
+    country_latest_dates: dict[str, datetime.date | None] = {}
     with Session(engine) as session:
-        latest_history_date = session.exec(
-            select(func.max(WeatherData.date)).where(WeatherData.source == "history")
-        ).one()
+        for country in WEATHER_GRID:
+            latest_history_date = session.exec(
+                select(func.max(WeatherData.date))
+                .where(WeatherData.source == "history")
+                .where(WeatherData.country == country)
+            ).one()
+            resolved_latest = (
+                latest_history_date.date()
+                if hasattr(latest_history_date, "date")
+                else latest_history_date
+            )
+            country_latest_dates[country] = resolved_latest
 
-    if latest_history_date is None:
+    for country, latest_date in country_latest_dates.items():
+        logger.info("[%s] Latest history date=%s", country, latest_date)
+
+    if any(latest_date is None for latest_date in country_latest_dates.values()):
         history_start = client.HISTORY_START
     else:
-        resolved_latest = (
-            latest_history_date.date()
-            if hasattr(latest_history_date, "date")
-            else latest_history_date
-        )
-        history_start = resolved_latest + datetime.timedelta(days=1)
+        resolved_dates = [
+            latest_date
+            for latest_date in country_latest_dates.values()
+            if latest_date is not None
+        ]
+        history_start = min(resolved_dates) if resolved_dates else client.HISTORY_START
+    logger.info("Safe history start=%s", history_start)
 
     history_start_for_call: datetime.date | None = history_start
     history_end_for_call: datetime.date | None = yesterday
     if history_start > yesterday:
-        history_start_for_call = None
-        history_end_for_call = None
+        # Use an empty window (start > end) to skip history fetch.
+        # Passing None/None would trigger a full history rebuild in WeatherClient.
+        history_start_for_call = today
+        history_end_for_call = yesterday
 
     logger.info(
         "Daily update windows history=[%s, %s] forecast=[%s, %s]",
@@ -96,6 +114,19 @@ def main() -> None:
     fresh_rows = _to_weather_models(fresh_df)
 
     with Session(engine) as session:
+        if (
+            history_start_for_call is not None
+            and history_end_for_call is not None
+            and history_start_for_call <= history_end_for_call
+        ):
+            # Replace only refreshed history range to keep writes idempotent.
+            session.exec(
+                delete(WeatherData)
+                .where(WeatherData.source == "history")
+                .where(WeatherData.date >= history_start_for_call)
+                .where(WeatherData.date <= history_end_for_call)
+            )
+
         session.exec(
             delete(WeatherData)
             .where(WeatherData.source == "forecast")

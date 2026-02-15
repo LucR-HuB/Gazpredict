@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sqlmodel import select
 from xgboost import XGBRegressor
 
 SRC_ROOT = Path(__file__).resolve().parents[1]
@@ -18,12 +19,22 @@ from features.feature_definitions import (
     compute_stock_physics,
 )
 
+try:
+    from backend.src.config.database import engine
+    from backend.src.models.gie import GieData
+    from backend.src.models.weather import WeatherData
+except ImportError:
+    project_root = Path(__file__).resolve().parents[3]
+    if str(project_root) not in sys.path:
+        sys.path.append(str(project_root))
+    from backend.src.config.database import engine
+    from backend.src.models.gie import GieData
+    from backend.src.models.weather import WeatherData
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 MODEL_PATH = PROJECT_ROOT / "data" / "models" / "xgb_gas_v1.json"
 MODEL_FEATURES_PATH = PROJECT_ROOT / "data" / "models" / "model_features.json"
-WEATHER_PATH = PROJECT_ROOT / "data" / "raw" / "weather_daily.csv"
-GIE_PATH = PROJECT_ROOT / "data" / "raw" / "gie_history.csv"
 OUTPUT_PATH = PROJECT_ROOT / "data" / "predictions" / "forecast_14d.csv"
 
 FORECAST_HORIZON_DAYS = 14
@@ -67,7 +78,7 @@ def _prepare_gie_table(gie_df: pd.DataFrame) -> pd.DataFrame:
     gie = gie.rename(columns={"storage_twh": "stock_twh"})
 
     if "stock_twh" not in gie.columns:
-        raise KeyError("Missing 'storage_twh' column in gie_history.csv.")
+        raise KeyError("Missing required 'storage_twh' column in GIE data.")
 
     gie["net_injection"] = gie.groupby("country")["stock_twh"].diff()
     return gie
@@ -89,7 +100,22 @@ def _load_artifacts() -> tuple[XGBRegressor, list[str]]:
     return model, model_features
 
 
-def run_recursive_forecast() -> pd.DataFrame:
+def _load_inputs_from_sql() -> tuple[pd.DataFrame, pd.DataFrame]:
+    weather_df = pd.read_sql(select(WeatherData), engine)
+    gie_df = pd.read_sql(select(GieData), engine)
+
+    if gie_df.empty:
+        raise RuntimeError("No GIE data available in SQL database.")
+    if weather_df.empty:
+        raise RuntimeError("No weather data available in SQL database.")
+
+    return weather_df, gie_df
+
+
+def run_recursive_forecast(
+    weather_df: pd.DataFrame | None = None,
+    gie_df: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     logger = logging.getLogger("run_inference")
     model, model_features = _load_artifacts()
 
@@ -97,8 +123,8 @@ def run_recursive_forecast() -> pd.DataFrame:
     forecast_dates = pd.date_range(start=today, periods=FORECAST_HORIZON_DAYS, freq="D")
     logger.info("Forecast window: %s to %s", forecast_dates.min().date(), forecast_dates.max().date())
 
-    weather_df = pd.read_csv(WEATHER_PATH)
-    gie_df = pd.read_csv(GIE_PATH)
+    if weather_df is None or gie_df is None:
+        weather_df, gie_df = _load_inputs_from_sql()
 
     weather_forecast, weather_all = _prepare_weather_tables(weather_df, today)
     gie = _prepare_gie_table(gie_df)

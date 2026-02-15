@@ -65,43 +65,51 @@ def main() -> None:
     init_db()
     client = GIEClient(api_key=api_key)
 
-    with Session(engine) as session:
-        latest_date = session.exec(select(func.max(GieData.date))).one()
-
-    if latest_date is None:
-        start_date = DEFAULT_START_DATE
-    else:
-        resolved_latest = latest_date.date() if hasattr(latest_date, "date") else latest_date
-        start_date = resolved_latest + timedelta(days=1)
-
     end_date = date.today() - timedelta(days=1)
-    if start_date > end_date:
-        logger.info("Data is up to date.")
-        logger.info("Computed window start=%s end=%s", start_date, end_date)
-        return
-
-    date_from = start_date.isoformat()
-    date_to = end_date.isoformat()
-    logger.info("Fetching missing window: %s -> %s", date_from, date_to)
-
-    raw_records: list[dict] = []
+    total_inserted = 0
     for country in COUNTRIES:
-        logger.info("Fetching country=%s", country)
-        rows = client.fetch_data(date_from=date_from, date_to=date_to, country=country)
-        raw_records.extend(rows)
+        with Session(engine) as session:
+            latest_date = session.exec(
+                select(func.max(GieData.date)).where(GieData.country == country)
+            ).one()
 
-    missing_df = client.process_data(raw_records)
-    gie_rows = _to_gie_models(missing_df)
+        if latest_date is None:
+            start_date = DEFAULT_START_DATE
+        else:
+            resolved_latest = (
+                latest_date.date() if hasattr(latest_date, "date") else latest_date
+            )
+            start_date = resolved_latest + timedelta(days=1)
 
-    if not gie_rows:
-        logger.info("No new rows to insert.")
-        return
+        if start_date > end_date:
+            logger.info("[%s] Up to date.", country)
+            logger.info(
+                "[%s] Computed window start=%s end=%s",
+                country,
+                start_date,
+                end_date,
+            )
+            continue
 
-    with Session(engine) as session:
-        session.add_all(gie_rows)
-        session.commit()
+        date_from = start_date.isoformat()
+        date_to = end_date.isoformat()
+        logger.info("[%s] Fetching missing window: %s -> %s", country, date_from, date_to)
+        raw_rows = client.fetch_data(date_from=date_from, date_to=date_to, country=country)
+        country_df = client.process_data(raw_rows)
+        gie_rows = _to_gie_models(country_df)
 
-    logger.info("GIE daily update finished. Added_rows=%s", len(gie_rows))
+        if not gie_rows:
+            logger.info("[%s] No new rows to insert.", country)
+            continue
+
+        with Session(engine) as session:
+            session.add_all(gie_rows)
+            session.commit()
+
+        total_inserted += len(gie_rows)
+        logger.info("[%s] Updated %s rows", country, len(gie_rows))
+
+    logger.info("GIE daily update finished. Added_rows=%s", total_inserted)
 
 
 if __name__ == "__main__":

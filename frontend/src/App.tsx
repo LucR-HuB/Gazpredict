@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  AreaChart,
   Badge,
   BarChart,
   Button,
@@ -9,7 +8,6 @@ import {
   Grid,
   LineChart,
   Metric,
-  NumberInput,
   ProgressBar,
   Select,
   SelectItem,
@@ -31,8 +29,19 @@ import type { CustomTooltipProps } from "@tremor/react";
 import createPlotlyComponent from "react-plotly.js/factory";
 import Plotly from "plotly.js-dist-min";
 import type { Config, Data, Layout, PlotMouseEvent } from "plotly.js";
-import { getForecast, getGieHistory, runPipeline } from "./lib/api";
-import type { ForecastRecord, HistoryRecord } from "./lib/api";
+import {
+  Bar as RechartsBar,
+  CartesianGrid,
+  ComposedChart,
+  Legend,
+  Line as RechartsLine,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { getForecast, getGieHistory, getSystemMetrics, runPipeline } from "./lib/api";
+import type { ForecastRecord, HistoryRecord, SystemMetrics } from "./lib/api";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const WITHDRAWAL_ALERT_THRESHOLD_DAY = -0.5;
@@ -128,6 +137,10 @@ type TransitionPoint = {
   dateLabel: string;
   Actual?: number;
   Forecast?: number;
+  stock_upper?: number;
+  stock_lower?: number;
+  injection_upper?: number;
+  injection_lower?: number;
 };
 
 type ForecastExportRow = {
@@ -246,6 +259,13 @@ const MAP_POPUP_MAX_WIDTH = 420;
 const MAP_POPUP_ESTIMATED_HEIGHT = 320;
 const OVERVIEW_FORECAST_TOP_COUNTRIES = 6;
 const OVERVIEW_FORECAST_COLORS = ["cyan", "blue", "indigo", "violet", "fuchsia", "emerald", "slate"];
+const DEFAULT_SYSTEM_METRICS: SystemMetrics = {
+  r2: 0,
+  mae: 0,
+  rmse: 0,
+  wape: 0,
+  message: "No model trained yet",
+};
 
 function dateToTimestamp(date: string): number {
   const normalized = date.includes("T") ? date : `${date}T00:00:00Z`;
@@ -415,11 +435,24 @@ function getMapMetricConfig(metric: MapMetric): MapMetricConfig {
   };
 }
 
-function parseNumericInput(value: number, min: number, max: number, fallback: number): number {
-  if (!Number.isFinite(value)) {
+function parseNumericInput(
+  value: number | string | null | undefined,
+  min: number,
+  max: number,
+  fallback: number,
+): number {
+  if (value === null || value === undefined) {
     return fallback;
   }
-  return Math.min(Math.max(value, min), max);
+
+  const parsed =
+    typeof value === "number" ? value : Number.parseFloat(value.trim().replace(",", "."));
+
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(Math.max(parsed, min), max);
 }
 
 function getCountryCodeFromCustomData(customData: unknown): string | null {
@@ -617,6 +650,12 @@ function buildTransitionSeries(
   for (const row of forecastRows) {
     const existing = byDate.get(row.date) ?? { date: row.date, dateLabel: formatDateLabel(row.date) };
     existing.Forecast = row.prediction_twh;
+    if (row.stock_upper !== null) {
+      existing.stock_upper = row.stock_upper;
+    }
+    if (row.stock_lower !== null) {
+      existing.stock_lower = row.stock_lower;
+    }
     byDate.set(row.date, existing);
   }
 
@@ -641,6 +680,12 @@ function buildFluxSeries(
   for (const row of forecastRows) {
     const existing = byDate.get(row.date) ?? { date: row.date, dateLabel: formatDateLabel(row.date) };
     existing.Forecast = row.net_injection;
+    if (row.injection_upper !== null) {
+      existing.injection_upper = row.injection_upper;
+    }
+    if (row.injection_lower !== null) {
+      existing.injection_lower = row.injection_lower;
+    }
     byDate.set(row.date, existing);
   }
 
@@ -697,6 +742,7 @@ function App() {
   const worldMapRef = useRef<HTMLDivElement | null>(null);
   const [forecast, setForecast] = useState<ForecastRecord[]>([]);
   const [history, setHistory] = useState<HistoryRecord[]>([]);
+  const [systemMetrics, setSystemMetrics] = useState<SystemMetrics>(DEFAULT_SYSTEM_METRICS);
   const [loading, setLoading] = useState(true);
   const [logs, setLogs] = useState<string>("> System ready.");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -708,11 +754,21 @@ function App() {
   const [mapStatusFilter, setMapStatusFilter] = useState<MapStatusFilter>("All");
   const [mapProjection, setMapProjection] = useState<MapProjection>("natural earth");
   const [selectedCountry, setSelectedCountry] = useState<string>("");
-  const [highWithdrawalThreshold14d, setHighWithdrawalThreshold14d] = useState<number>(
-    DEFAULT_WITHDRAWAL_THRESHOLD_14D,
+  const [highWithdrawalThresholdInput, setHighWithdrawalThresholdInput] = useState<string>(
+    String(DEFAULT_WITHDRAWAL_THRESHOLD_14D),
   );
-  const [historyLookbackDays, setHistoryLookbackDays] = useState<number>(
-    DEFAULT_HISTORY_LOOKBACK_DAYS,
+  const highWithdrawalThreshold14d = useMemo(
+    () =>
+      parseNumericInput(
+        highWithdrawalThresholdInput,
+        0.5,
+        30,
+        DEFAULT_WITHDRAWAL_THRESHOLD_14D,
+      ),
+    [highWithdrawalThresholdInput],
+  );
+  const [historyLookbackInput, setHistoryLookbackInput] = useState<string>(
+    String(DEFAULT_HISTORY_LOOKBACK_DAYS),
   );
 
   const appendLogs = useCallback((entry: string) => {
@@ -723,9 +779,14 @@ function App() {
     setLoading(true);
     setLoadError(null);
     try {
-      const [forecastRows, historyRows] = await Promise.all([getForecast(), getGieHistory()]);
+      const [forecastRows, historyRows, modelMetrics] = await Promise.all([
+        getForecast(),
+        getGieHistory(),
+        getSystemMetrics(),
+      ]);
       setForecast(sortForecastRecords(forecastRows));
       setHistory(sortHistoryRecords(historyRows));
+      setSystemMetrics(modelMetrics);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown loading error";
       setLoadError(message);
@@ -901,15 +962,23 @@ function App() {
     return forecast.filter((row) => row.country === selectedCountry);
   }, [forecast, selectedCountry]);
 
+  const effectiveHistoryLookbackDays = useMemo(() => {
+    const parsed = Number(historyLookbackInput);
+    if (!Number.isFinite(parsed)) {
+      return DEFAULT_HISTORY_LOOKBACK_DAYS;
+    }
+    return Math.max(Math.round(parsed), 1);
+  }, [historyLookbackInput]);
+
   const historyWindow = useMemo(() => {
     if (selectedCountryHistory.length === 0) {
       return [] as HistoryWithNetInjection[];
     }
 
     const maxTs = dateToTimestamp(selectedCountryHistory[selectedCountryHistory.length - 1].date);
-    const minTs = maxTs - (Math.max(historyLookbackDays, 1) - 1) * DAY_MS;
+    const minTs = maxTs - (effectiveHistoryLookbackDays - 1) * DAY_MS;
     return selectedCountryHistory.filter((row) => dateToTimestamp(row.date) >= minTs);
-  }, [selectedCountryHistory, historyLookbackDays]);
+  }, [selectedCountryHistory, effectiveHistoryLookbackDays]);
 
   const transitionSeries = useMemo(
     () => buildTransitionSeries(historyWindow, selectedCountryForecast),
@@ -1275,6 +1344,18 @@ function App() {
     (row) => row.net_injection < WITHDRAWAL_ALERT_THRESHOLD_DAY,
   );
 
+  const modelTrainingDateLabel = useMemo(() => {
+    if (!systemMetrics.training_date) {
+      return null;
+    }
+
+    const parsed = new Date(systemMetrics.training_date);
+    if (Number.isNaN(parsed.getTime())) {
+      return systemMetrics.training_date;
+    }
+    return parsed.toLocaleString("en-US");
+  }, [systemMetrics.training_date]);
+
   return (
     <main className="dark min-h-screen bg-slate-950 p-10 font-sans text-slate-100">
       <Flex className="mb-8" justifyContent="between" alignItems="center">
@@ -1320,32 +1401,26 @@ function App() {
           </div>
           <div>
             <Text>High Withdrawal Threshold (14d, TWh)</Text>
-            <NumberInput
-              className="mt-2"
-              value={highWithdrawalThreshold14d}
+            <input
+              className="mt-2 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-0 placeholder:text-slate-500 focus:border-slate-500 focus:ring-2 focus:ring-slate-500/50"
+              type="number"
+              inputMode="decimal"
+              value={highWithdrawalThresholdInput}
               min={0.5}
               max={30}
               step={0.5}
-              onValueChange={(value) =>
-                setHighWithdrawalThreshold14d(
-                  parseNumericInput(value, 0.5, 30, DEFAULT_WITHDRAWAL_THRESHOLD_14D),
-                )
-              }
+              onChange={(event) => setHighWithdrawalThresholdInput(event.target.value)}
+              onBlur={() => setHighWithdrawalThresholdInput(highWithdrawalThreshold14d.toString())}
             />
           </div>
           <div>
             <Text>History Window (days)</Text>
-            <NumberInput
-              className="mt-2"
-              value={historyLookbackDays}
-              min={30}
-              max={3650}
-              step={30}
-              onValueChange={(value) =>
-                setHistoryLookbackDays(
-                  Math.round(parseNumericInput(value, 30, 3650, DEFAULT_HISTORY_LOOKBACK_DAYS)),
-                )
-              }
+            <input
+              className="mt-2 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none ring-0 placeholder:text-slate-500 focus:border-slate-500 focus:ring-2 focus:ring-slate-500/50"
+              type="number"
+              inputMode="numeric"
+              value={historyLookbackInput}
+              onChange={(event) => setHistoryLookbackInput(event.target.value)}
             />
           </div>
         </Grid>
@@ -1767,32 +1842,144 @@ function App() {
 
                   <Card className="mt-6">
                     <Title>Actual → Forecast Transition</Title>
-                    <AreaChart
-                      className="mt-4 h-80"
-                      data={transitionSeries}
-                      index="dateLabel"
-                      categories={["Actual", "Forecast"]}
-                      colors={["blue", "red"]}
-                      yAxisWidth={70}
-                      showAnimation
-                      customTooltip={DateTooltip}
-                      valueFormatter={formatChartValue}
-                    />
+                    <div className="mt-4 h-80">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={transitionSeries} margin={{ top: 8, right: 16, left: 4, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.45} />
+                          <XAxis
+                            dataKey="date"
+                            tickFormatter={formatDateLabel}
+                            tick={{ fill: "#94a3b8", fontSize: 12 }}
+                            tickLine={false}
+                            axisLine={{ stroke: "#475569", opacity: 0.6 }}
+                          />
+                          <YAxis
+                            tick={{ fill: "#94a3b8", fontSize: 12 }}
+                            tickFormatter={(value: number) => formatChartValue(value)}
+                            tickLine={false}
+                            axisLine={{ stroke: "#475569", opacity: 0.6 }}
+                            width={70}
+                          />
+                          <RechartsTooltip
+                            formatter={(value: unknown, name: unknown) => [
+                              formatTooltipValue(value),
+                              String(name ?? "Value"),
+                            ]}
+                            labelFormatter={(label: unknown) =>
+                              formatTooltipDate(typeof label === "string" ? label : String(label ?? ""))
+                            }
+                            contentStyle={{
+                              borderRadius: "0.5rem",
+                              backgroundColor: "rgba(15, 23, 42, 0.95)",
+                              borderColor: "rgba(148, 163, 184, 0.3)",
+                            }}
+                            itemStyle={{ color: "#f1f5f9" }}
+                            labelStyle={{ color: "#f8fafc", fontWeight: 600 }}
+                          />
+                          <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: "12px" }} />
+                          <RechartsLine
+                            type="monotone"
+                            dataKey="Actual"
+                            name="Actual"
+                            stroke="#3b82f6"
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                          <RechartsLine
+                            type="monotone"
+                            dataKey="Forecast"
+                            name="Forecast"
+                            stroke="#ef4444"
+                            strokeWidth={2}
+                            dot={false}
+                          />
+                          <RechartsLine
+                            type="monotone"
+                            dataKey="stock_upper"
+                            name="Stock Upper"
+                            stroke="#82ca9d"
+                            strokeDasharray="3 3"
+                            dot={false}
+                            strokeWidth={1}
+                            connectNulls
+                          />
+                          <RechartsLine
+                            type="monotone"
+                            dataKey="stock_lower"
+                            name="Stock Lower"
+                            stroke="#82ca9d"
+                            strokeDasharray="3 3"
+                            dot={false}
+                            strokeWidth={1}
+                            connectNulls
+                          />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
                   </Card>
 
                   <Card className="mt-6">
                     <Title>Net Injection (Actual vs Forecast)</Title>
-                    <BarChart
-                      className="mt-4 h-72"
-                      data={fluxSeries}
-                      index="dateLabel"
-                      categories={["Actual", "Forecast"]}
-                      colors={["blue", "red"]}
-                      yAxisWidth={70}
-                      showAnimation
-                      customTooltip={DateTooltip}
-                      valueFormatter={formatChartValue}
-                    />
+                    <div className="mt-4 h-72">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={fluxSeries} margin={{ top: 8, right: 16, left: 4, bottom: 8 }}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#334155" strokeOpacity={0.45} />
+                          <XAxis
+                            dataKey="date"
+                            tickFormatter={formatDateLabel}
+                            tick={{ fill: "#94a3b8", fontSize: 12 }}
+                            tickLine={false}
+                            axisLine={{ stroke: "#475569", opacity: 0.6 }}
+                          />
+                          <YAxis
+                            tick={{ fill: "#94a3b8", fontSize: 12 }}
+                            tickFormatter={(value: number) => formatChartValue(value)}
+                            tickLine={false}
+                            axisLine={{ stroke: "#475569", opacity: 0.6 }}
+                            width={70}
+                          />
+                          <RechartsTooltip
+                            formatter={(value: unknown, name: unknown) => [
+                              formatTooltipValue(value),
+                              String(name ?? "Value"),
+                            ]}
+                            labelFormatter={(label: unknown) =>
+                              formatTooltipDate(typeof label === "string" ? label : String(label ?? ""))
+                            }
+                            contentStyle={{
+                              borderRadius: "0.5rem",
+                              backgroundColor: "rgba(15, 23, 42, 0.95)",
+                              borderColor: "rgba(148, 163, 184, 0.3)",
+                            }}
+                            itemStyle={{ color: "#f1f5f9" }}
+                            labelStyle={{ color: "#f8fafc", fontWeight: 600 }}
+                          />
+                          <Legend wrapperStyle={{ color: "#cbd5e1", fontSize: "12px" }} />
+                          <RechartsBar dataKey="Actual" name="Actual" fill="#3b82f6" />
+                          <RechartsBar dataKey="Forecast" name="Forecast" fill="#ef4444" />
+                          <RechartsLine
+                            type="monotone"
+                            dataKey="injection_upper"
+                            name="Injection Upper"
+                            stroke="#82ca9d"
+                            strokeDasharray="3 3"
+                            dot={false}
+                            strokeWidth={1}
+                            connectNulls
+                          />
+                          <RechartsLine
+                            type="monotone"
+                            dataKey="injection_lower"
+                            name="Injection Lower"
+                            stroke="#82ca9d"
+                            strokeDasharray="3 3"
+                            dot={false}
+                            strokeWidth={1}
+                            connectNulls
+                          />
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
                   </Card>
 
                   <Card className="mt-6">
@@ -1912,6 +2099,35 @@ function App() {
             <Card className="mt-6">
               <Title>System Monitor</Title>
               <Text>Data integrity checks and manual pipeline control.</Text>
+            </Card>
+
+            <Card className="mt-6">
+              <Title>Model Fit Scores</Title>
+              <Text>Latest training metrics from the XGBoost model.</Text>
+              <Grid numItems={1} numItemsSm={2} numItemsLg={4} className="mt-4 gap-4">
+                <Card decoration="top" decorationColor="blue">
+                  <Text>R²</Text>
+                  <Metric>{formatNumber(systemMetrics.r2, 3)}</Metric>
+                </Card>
+                <Card decoration="top" decorationColor="cyan">
+                  <Text>MAE</Text>
+                  <Metric>{formatNumber(systemMetrics.mae, 3)}</Metric>
+                </Card>
+                <Card decoration="top" decorationColor="indigo">
+                  <Text>RMSE</Text>
+                  <Metric>{formatNumber(systemMetrics.rmse, 3)}</Metric>
+                </Card>
+                <Card decoration="top" decorationColor="violet">
+                  <Text>WAPE</Text>
+                  <Metric>{formatNumber(systemMetrics.wape * 100, 2)}%</Metric>
+                </Card>
+              </Grid>
+              {modelTrainingDateLabel && (
+                <Text className="mt-3 text-xs text-slate-300">Training date: {modelTrainingDateLabel}</Text>
+              )}
+              {systemMetrics.message && (
+                <Text className="mt-2 text-xs text-amber-300">{systemMetrics.message}</Text>
+              )}
             </Card>
 
             <Grid numItems={1} numItemsLg={2} className="mt-6 gap-6">

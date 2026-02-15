@@ -5,6 +5,10 @@ export interface ForecastRecord {
   country: string;
   prediction_twh: number;
   net_injection: number;
+  injection_upper: number | null;
+  injection_lower: number | null;
+  stock_upper: number | null;
+  stock_lower: number | null;
 }
 
 export interface HistoryRecord {
@@ -17,6 +21,15 @@ export interface HistoryRecord {
 export interface PipelineResponse {
   status: string;
   logs: string;
+}
+
+export interface SystemMetrics {
+  r2: number;
+  mae: number;
+  rmse: number;
+  wape: number;
+  training_date?: string;
+  message?: string;
 }
 
 function getErrorMessage(error: unknown): string {
@@ -71,6 +84,10 @@ function normalizeForecastRecord(value: unknown): ForecastRecord | null {
   const country = typeof candidate.country === "string" ? candidate.country : null;
   const prediction = toFiniteNumber(candidate.prediction_twh ?? candidate.stock_twh_simulated);
   const netInjection = toFiniteNumber(candidate.net_injection ?? candidate.net_injection_pred);
+  const injectionUpper = toFiniteNumber(candidate.injection_upper ?? candidate.confidence_upper);
+  const injectionLower = toFiniteNumber(candidate.injection_lower ?? candidate.confidence_lower);
+  const stockUpper = toFiniteNumber(candidate.stock_upper);
+  const stockLower = toFiniteNumber(candidate.stock_lower);
 
   if (!date || !country || prediction === null || netInjection === null) {
     return null;
@@ -81,6 +98,10 @@ function normalizeForecastRecord(value: unknown): ForecastRecord | null {
     country,
     prediction_twh: prediction,
     net_injection: netInjection,
+    injection_upper: injectionUpper,
+    injection_lower: injectionLower,
+    stock_upper: stockUpper,
+    stock_lower: stockLower,
   };
 }
 
@@ -97,6 +118,37 @@ function normalizePipelineResponse(payload: unknown): PipelineResponse {
   const logs = typeof candidate.logs === "string" ? candidate.logs : "> Pipeline completed.";
 
   return { status, logs };
+}
+
+function normalizeSystemMetrics(payload: unknown): SystemMetrics {
+  const defaults: SystemMetrics = {
+    r2: 0,
+    mae: 0,
+    rmse: 0,
+    wape: 0,
+    message: "No model trained yet",
+  };
+
+  if (typeof payload !== "object" || payload === null) {
+    return defaults;
+  }
+
+  const candidate = payload as Record<string, unknown>;
+  const r2 = toFiniteNumber(candidate.r2) ?? 0;
+  const mae = toFiniteNumber(candidate.mae) ?? 0;
+  const rmse = toFiniteNumber(candidate.rmse) ?? 0;
+  const wape = toFiniteNumber(candidate.wape) ?? 0;
+  const trainingDate = typeof candidate.training_date === "string" ? candidate.training_date : undefined;
+  const message = typeof candidate.message === "string" ? candidate.message : undefined;
+
+  return {
+    r2,
+    mae,
+    rmse,
+    wape,
+    ...(trainingDate ? { training_date: trainingDate } : {}),
+    ...(message ? { message } : {}),
+  };
 }
 
 export async function getGieHistory(params?: {
@@ -163,13 +215,37 @@ export async function runPipeline(): Promise<PipelineResponse> {
       },
     });
 
-    const payload: unknown = await response.json();
+    const payload: unknown = await response.json().catch(() => null);
     if (!response.ok) {
-      throw new Error(`Pipeline request failed with status ${response.status}`);
+      const detail =
+        typeof payload === "object" &&
+        payload !== null &&
+        "detail" in payload &&
+        typeof (payload as { detail?: unknown }).detail === "string"
+          ? (payload as { detail: string }).detail
+          : null;
+      throw new Error(
+        `Pipeline request failed with status ${response.status}${detail ? `: ${detail}` : ""}`,
+      );
     }
 
     return normalizePipelineResponse(payload);
   } catch (error) {
     throw new Error(`Pipeline failed: ${getErrorMessage(error)}`);
+  }
+}
+
+export async function getSystemMetrics(): Promise<SystemMetrics> {
+  try {
+    const response = await fetch(`${API_URL}/api/system/metrics`);
+    if (!response.ok) {
+      throw new Error(`System metrics request failed with status ${response.status}`);
+    }
+
+    const payload: unknown = await response.json();
+    return normalizeSystemMetrics(payload);
+  } catch (error) {
+    console.error("API Error (System Metrics):", error);
+    return normalizeSystemMetrics(null);
   }
 }

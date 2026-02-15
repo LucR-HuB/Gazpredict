@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from xgboost import XGBRegressor
 
 
@@ -12,6 +13,7 @@ DATASET_PATH = PROJECT_ROOT / "data" / "processed" / "dataset_v2_featured.csv"
 MODELS_DIR = PROJECT_ROOT / "data" / "models"
 MODEL_PATH = MODELS_DIR / "xgb_gas_v1.json"
 MODEL_FEATURES_PATH = MODELS_DIR / "model_features.json"
+METRICS_PATH = MODELS_DIR / "metrics.json"
 
 TARGET_COLUMN = "net_injection"
 FEATURE_COLUMNS = [
@@ -78,6 +80,21 @@ def train_and_save() -> None:
     model.fit(X, y)
     logger.info("Model training completed.")
 
+    predictions = model.predict(X)
+    r2 = r2_score(y, predictions)
+    mae = mean_absolute_error(y, predictions)
+    rmse = np.sqrt(mean_squared_error(y, predictions))
+    abs_y_sum = np.sum(np.abs(y))
+    wape = np.sum(np.abs(y - predictions)) / abs_y_sum if abs_y_sum != 0 else 0.0
+
+    metrics = {
+        "r2": float(r2),
+        "mae": float(mae),
+        "rmse": float(rmse),
+        "wape": float(wape),
+        "training_date": str(pd.Timestamp.now()),
+    }
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     model.save_model(MODEL_PATH)
     logger.info("Model saved to %s", MODEL_PATH)
@@ -86,6 +103,16 @@ def train_and_save() -> None:
     MODEL_FEATURES_PATH.write_text(json.dumps(model_features, indent=2))
     logger.info("Feature order saved to %s", MODEL_FEATURES_PATH)
     logger.info("Number of model features (with dummies): %s", len(model_features))
+
+    METRICS_PATH.write_text(json.dumps(metrics, indent=2))
+    logger.info("Model metrics saved to %s", METRICS_PATH)
+    logger.info(
+        "Model fit metrics | R2=%.6f | MAE=%.6f | RMSE=%.6f | WAPE=%.6f",
+        metrics["r2"],
+        metrics["mae"],
+        metrics["rmse"],
+        metrics["wape"],
+    )
 
 
 def main() -> None:
@@ -98,4 +125,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
