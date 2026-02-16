@@ -51,7 +51,7 @@ def _build_fixed_buffer(values: list[float], size: int, pad_value: float) -> deq
     return deque(clean_values, maxlen=size)
 
 
-def _prepare_weather_tables(weather_df: pd.DataFrame, today: pd.Timestamp) -> tuple[pd.DataFrame, pd.DataFrame]:
+def _prepare_weather_tables(weather_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     weather = weather_df.copy()
     weather["date"] = pd.to_datetime(weather["date"], errors="coerce")
     weather = weather.dropna(subset=["date", "country"]).copy()
@@ -60,13 +60,13 @@ def _prepare_weather_tables(weather_df: pd.DataFrame, today: pd.Timestamp) -> tu
 
     weather["hdd"] = compute_hdd(weather["temp_weighted"])
 
-    forecast = weather[
-        (weather["source"].astype(str).str.lower() == "forecast") & (weather["date"] >= today)
-    ].copy()
+    source = weather["source"].astype(str).str.lower()
+    forecast = weather[source == "forecast"].copy()
     forecast = forecast[["date", "country", "hdd", "wind_weighted"]].sort_values(["country", "date"])
 
-    weather_all = weather[["date", "country", "hdd", "wind_weighted"]].sort_values(["country", "date"])
-    return forecast, weather_all
+    history = weather[source == "history"].copy()
+    history = history[["date", "country", "hdd", "wind_weighted"]].sort_values(["country", "date"])
+    return forecast, history
 
 
 def _prepare_gie_table(gie_df: pd.DataFrame) -> pd.DataFrame:
@@ -120,13 +120,17 @@ def run_recursive_forecast(
     model, model_features = _load_artifacts()
 
     today = pd.Timestamp.today().normalize()
-    forecast_dates = pd.date_range(start=today, periods=FORECAST_HORIZON_DAYS, freq="D")
-    logger.info("Forecast window: %s to %s", forecast_dates.min().date(), forecast_dates.max().date())
+    forecast_end_exclusive = today + pd.Timedelta(days=FORECAST_HORIZON_DAYS)
+    logger.info(
+        "Global horizon end (exclusive): %s (forecast weather used from %s onward)",
+        forecast_end_exclusive.date(),
+        today.date(),
+    )
 
     if weather_df is None or gie_df is None:
         weather_df, gie_df = _load_inputs_from_sql()
 
-    weather_forecast, weather_all = _prepare_weather_tables(weather_df, today)
+    weather_forecast, weather_history = _prepare_weather_tables(weather_df)
     gie = _prepare_gie_table(gie_df)
 
     trained_countries = sorted(
@@ -147,45 +151,111 @@ def run_recursive_forecast(
 
         latest_row = gie_country.iloc[-1]
         latest_stock = float(latest_row["stock_twh"])
-        latest_date = latest_row["date"]
+        latest_history_date = latest_row["date"]
+        start_inference_date = latest_history_date + pd.Timedelta(days=1)
+        end_inference_date = forecast_end_exclusive
+        country_inference_dates = pd.date_range(
+            start=start_inference_date,
+            end=end_inference_date,
+            freq="D",
+            inclusive="left",
+        )
+        if country_inference_dates.empty:
+            logger.warning(
+                "Skipping %s: empty inference window (%s to %s exclusive).",
+                country,
+                start_inference_date.date(),
+                end_inference_date.date(),
+            )
+            continue
+        logger.info(
+            "[%s] Inference window: %s -> %s (exclusive, %s days)",
+            country,
+            start_inference_date.date(),
+            end_inference_date.date(),
+            len(country_inference_dates),
+        )
 
-        if latest_date < (today - pd.Timedelta(days=1)):
+        if latest_history_date < (today - pd.Timedelta(days=1)):
             logger.warning(
                 "Country %s latest stock date is %s (older than yesterday). Using latest available context.",
                 country,
-                latest_date.date(),
+                latest_history_date.date(),
             )
 
         lag_values = gie_country["net_injection"].dropna().tolist()
         lag_pad = lag_values[-1] if lag_values else 0.0
         lag_buffer = _build_fixed_buffer(lag_values, size=7, pad_value=lag_pad)
 
-        weather_history_country = weather_all[
-            (weather_all["country"] == country) & (weather_all["date"] < today)
-        ].sort_values("date")
-
-        weather_forecast_country = weather_forecast[weather_forecast["country"] == country].set_index("date")
+        weather_history_country = (
+            weather_history[weather_history["country"] == country]
+            .drop_duplicates(subset=["date"], keep="last")
+            .set_index("date")
+            .sort_index()
+        )
+        weather_forecast_country = (
+            weather_forecast[weather_forecast["country"] == country]
+            .drop_duplicates(subset=["date"], keep="last")
+            .set_index("date")
+            .sort_index()
+        )
         if weather_forecast_country.empty:
-            logger.warning("Skipping %s: no forecast weather available from today onward.", country)
+            logger.warning("Skipping %s: no forecast weather available.", country)
             continue
 
-        weather_forecast_country = weather_forecast_country.reindex(forecast_dates).ffill().bfill()
-        if weather_forecast_country[["hdd", "wind_weighted"]].isna().any().any():
-            logger.warning("Skipping %s: weather forecast has unresolved missing values.", country)
-            continue
+        required_history_dates = country_inference_dates[country_inference_dates < today]
+        required_forecast_dates = country_inference_dates[country_inference_dates >= today]
 
-        first_hdd = float(weather_forecast_country.iloc[0]["hdd"])
-        first_wind = float(weather_forecast_country.iloc[0]["wind_weighted"])
+        history_slice = pd.DataFrame(columns=["hdd", "wind_weighted"])
+        if len(required_history_dates) > 0:
+            history_slice = weather_history_country.reindex(required_history_dates)
+            if history_slice[["hdd", "wind_weighted"]].isna().any().any():
+                logger.warning(
+                    "Skipping %s: missing realized weather for nowcast dates %s -> %s.",
+                    country,
+                    required_history_dates.min().date(),
+                    required_history_dates.max().date(),
+                )
+                continue
 
-        hdd_values = weather_history_country["hdd"].dropna().tolist()
-        wind_values = weather_history_country["wind_weighted"].dropna().tolist()
+        forecast_slice = pd.DataFrame(columns=["hdd", "wind_weighted"])
+        if len(required_forecast_dates) > 0:
+            forecast_slice = weather_forecast_country.reindex(required_forecast_dates)
+            if forecast_slice[["hdd", "wind_weighted"]].isna().any().any():
+                logger.warning(
+                    "Skipping %s: missing forecast weather for dates %s -> %s.",
+                    country,
+                    required_forecast_dates.min().date(),
+                    required_forecast_dates.max().date(),
+                )
+                continue
+
+        if country_inference_dates[0] < today:
+            first_weather_row = history_slice.loc[country_inference_dates[0]]
+        else:
+            first_weather_row = forecast_slice.loc[country_inference_dates[0]]
+        first_hdd = float(first_weather_row["hdd"])
+        first_wind = float(first_weather_row["wind_weighted"])
+
+        history_seed = weather_history_country[weather_history_country.index < today]
+        forecast_seed = weather_forecast_country[
+            (weather_forecast_country.index >= today) & (weather_forecast_country.index < start_inference_date)
+        ]
+        weather_seed = pd.concat([history_seed, forecast_seed], axis=0).sort_index()
+        weather_seed = weather_seed[weather_seed.index < start_inference_date]
+
+        hdd_values = weather_seed["hdd"].dropna().tolist()
+        wind_values = weather_seed["wind_weighted"].dropna().tolist()
         hdd_buffer = _build_fixed_buffer(hdd_values, size=6, pad_value=first_hdd)
         wind_buffer = _build_fixed_buffer(wind_values, size=6, pad_value=first_wind)
 
         current_stock = latest_stock
 
-        for sim_date in forecast_dates:
-            weather_today = weather_forecast_country.loc[sim_date]
+        for sim_date in country_inference_dates:
+            if sim_date < today:
+                weather_today = history_slice.loc[sim_date]
+            else:
+                weather_today = forecast_slice.loc[sim_date]
             hdd_today = float(weather_today["hdd"])
             wind_today = float(weather_today["wind_weighted"])
 
@@ -259,7 +329,7 @@ def main() -> None:
     forecast_df = run_recursive_forecast()
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     forecast_df.to_csv(OUTPUT_PATH, index=False)
-    logger.info("Saved 14-day recursive forecast to %s", OUTPUT_PATH)
+    logger.info("Saved recursive nowcast + %s-day forecast to %s", FORECAST_HORIZON_DAYS, OUTPUT_PATH)
     logger.info("Output rows: %s", len(forecast_df))
 
 
