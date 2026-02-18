@@ -5,6 +5,7 @@ export interface ForecastRecord {
   country: string;
   prediction_twh: number;
   net_injection: number;
+  scenario?: string;
   injection_upper: number | null;
   injection_lower: number | null;
   stock_upper: number | null;
@@ -82,8 +83,11 @@ function normalizeForecastRecord(value: unknown): ForecastRecord | null {
   const candidate = value as Record<string, unknown>;
   const date = typeof candidate.date === "string" ? candidate.date : null;
   const country = typeof candidate.country === "string" ? candidate.country : null;
-  const prediction = toFiniteNumber(candidate.prediction_twh ?? candidate.stock_twh_simulated);
+  const prediction = toFiniteNumber(
+    candidate.prediction_twh ?? candidate.stock_twh ?? candidate.stock_twh_simulated,
+  );
   const netInjection = toFiniteNumber(candidate.net_injection ?? candidate.net_injection_pred);
+  const scenario = typeof candidate.scenario === "string" ? candidate.scenario : undefined;
   const injectionUpper = toFiniteNumber(candidate.injection_upper ?? candidate.confidence_upper);
   const injectionLower = toFiniteNumber(candidate.injection_lower ?? candidate.confidence_lower);
   const stockUpper = toFiniteNumber(candidate.stock_upper);
@@ -98,6 +102,7 @@ function normalizeForecastRecord(value: unknown): ForecastRecord | null {
     country,
     prediction_twh: prediction,
     net_injection: netInjection,
+    ...(scenario ? { scenario } : {}),
     injection_upper: injectionUpper,
     injection_lower: injectionLower,
     stock_upper: stockUpper,
@@ -197,9 +202,14 @@ export async function getForecast(): Promise<ForecastRecord[]> {
       return [];
     }
 
-    return payload
+    const rows = payload
       .map(normalizeForecastRecord)
       .filter((row): row is ForecastRecord => row !== null);
+
+    // Keep one baseline path for charts: nowcast + forecast + normal climatology branch.
+    const allowedScenarios = new Set(["actuel", "forecast", "scenario_normal"]);
+    const filteredRows = rows.filter((row) => !row.scenario || allowedScenarios.has(row.scenario));
+    return filteredRows.length > 0 ? filteredRows : rows;
   } catch (error) {
     console.error("API Error (Forecast):", error);
     return [];

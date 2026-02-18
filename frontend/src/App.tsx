@@ -44,6 +44,7 @@ const WITHDRAWAL_ALERT_THRESHOLD_DAY = -0.5;
 const DEFAULT_WITHDRAWAL_THRESHOLD_14D = 5.0;
 const DEFAULT_HISTORY_LOOKBACK_DAYS = 365;
 const OVERVIEW_FORECAST_TOP_COUNTRIES = 6;
+const NEAR_TERM_SCENARIOS = new Set(["actuel", "forecast"]);
 
 const DEFAULT_SYSTEM_METRICS: SystemMetrics = {
   r2: 0,
@@ -194,10 +195,14 @@ function App() {
   }, [comparisonPeers, countries, selectedCountry]);
 
   const historyWithNetInjection = useMemo(() => withNetInjection(history), [history]);
+  const forecastNearTerm = useMemo(
+    () => forecast.filter((row) => !row.scenario || NEAR_TERM_SCENARIOS.has(row.scenario)),
+    [forecast],
+  );
 
   const overviewRows = useMemo(
-    () => buildOverviewRows(historyWithNetInjection, forecast, highWithdrawalThreshold14d),
-    [forecast, highWithdrawalThreshold14d, historyWithNetInjection],
+    () => buildOverviewRows(historyWithNetInjection, forecastNearTerm, highWithdrawalThreshold14d),
+    [forecastNearTerm, highWithdrawalThreshold14d, historyWithNetInjection],
   );
 
   const overviewForecastChart = useMemo(
@@ -221,7 +226,7 @@ function App() {
     }
 
     const lastForecastByCountry = new Map<string, ForecastRecord>();
-    for (const row of forecast) {
+    for (const row of forecastNearTerm) {
       lastForecastByCountry.set(row.country, row);
     }
 
@@ -251,7 +256,7 @@ function App() {
         },
       ];
     });
-  }, [forecast, historyWithNetInjection, overviewRows]);
+  }, [forecastNearTerm, historyWithNetInjection, overviewRows]);
 
   const forecastRowsForExport = useMemo<ForecastExportRow[]>(() => {
     return forecast.map((row) => ({
@@ -259,7 +264,7 @@ function App() {
       country: row.country,
       prediction_twh: row.prediction_twh,
       net_injection: row.net_injection,
-      scenario: "Base Case",
+      scenario: row.scenario ?? "Base Case",
       temp_shock_c: 0,
     }));
   }, [forecast]);
@@ -442,7 +447,7 @@ function App() {
                       <CountryComparison
                         selectedCountries={effectiveComparisonCountries}
                         history={historyWithNetInjection}
-                        forecast={forecast}
+                        forecast={forecastNearTerm}
                         historyLookbackDays={effectiveHistoryLookbackDays}
                       />
                     )}

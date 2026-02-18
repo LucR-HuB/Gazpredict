@@ -57,6 +57,27 @@ function applyClimatologyToPoint(
   point.clim_avg = climatology.avg;
 }
 
+function assignForecastBuckets(
+  point: TransitionPoint,
+  rowDate: string,
+  forecastValue: number,
+  splitForecastDate: string | null,
+): void {
+  point.Forecast = forecastValue;
+
+  if (splitForecastDate === null) {
+    point.ForecastJ14 = forecastValue;
+    return;
+  }
+
+  if (dateToTimestamp(rowDate) <= dateToTimestamp(splitForecastDate)) {
+    point.ForecastJ14 = forecastValue;
+    return;
+  }
+
+  point.ForecastAfterJ14 = forecastValue;
+}
+
 export function sortHistoryRecords(rows: HistoryRecord[]): HistoryRecord[] {
   return [...rows].sort(
     (a, b) => a.country.localeCompare(b.country) || dateToTimestamp(a.date) - dateToTimestamp(b.date),
@@ -315,6 +336,7 @@ export function buildTransitionSeries(
   historyRows: HistoryWithNetInjection[],
   forecastRows: ForecastRecord[],
   climatologyByCountryDay: Record<string, ClimatologyStats> = {},
+  splitForecastDate: string | null = null,
 ): TransitionPoint[] {
   const byDate = new Map<string, TransitionPoint>();
   let latestHistoryRow: HistoryWithNetInjection | null = null;
@@ -336,7 +358,7 @@ export function buildTransitionSeries(
 
   for (const row of forecastRows) {
     const existing = byDate.get(row.date) ?? { date: row.date, dateLabel: formatDateLabel(row.date) };
-    existing.Forecast = row.prediction_twh;
+    assignForecastBuckets(existing, row.date, row.prediction_twh, splitForecastDate);
     applyClimatologyToPoint(existing, row.country, row.date, climatologyByCountryDay);
     if (row.stock_upper !== null) {
       existing.stock_upper = row.stock_upper;
@@ -366,8 +388,8 @@ export function buildTransitionSeries(
         dateLabel: formatDateLabel(latestHistoryRow.date),
       } as TransitionPoint);
 
-    if (existing.Forecast === undefined) {
-      existing.Forecast = latestHistoryRow.stock_twh;
+    if (existing.Forecast === undefined && existing.ForecastJ14 === undefined && existing.ForecastAfterJ14 === undefined) {
+      assignForecastBuckets(existing, latestHistoryRow.date, latestHistoryRow.stock_twh, splitForecastDate);
     }
     applyClimatologyToPoint(
       existing,
@@ -384,6 +406,7 @@ export function buildTransitionSeries(
 export function buildFluxSeries(
   historyRows: HistoryWithNetInjection[],
   forecastRows: ForecastRecord[],
+  splitForecastDate: string | null = null,
 ): TransitionPoint[] {
   const byDate = new Map<string, TransitionPoint>();
 
@@ -398,7 +421,7 @@ export function buildFluxSeries(
 
   for (const row of forecastRows) {
     const existing = byDate.get(row.date) ?? { date: row.date, dateLabel: formatDateLabel(row.date) };
-    existing.Forecast = row.net_injection;
+    assignForecastBuckets(existing, row.date, row.net_injection, splitForecastDate);
     if (row.injection_upper !== null) {
       existing.injection_upper = row.injection_upper;
     }

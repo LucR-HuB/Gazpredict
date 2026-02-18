@@ -28,6 +28,8 @@ export type TransitionPoint = {
   dateLabel: string;
   Actual?: number;
   Forecast?: number;
+  ForecastJ14?: number;
+  ForecastAfterJ14?: number;
   clim_min?: number;
   clim_diff?: number;
   clim_avg?: number;

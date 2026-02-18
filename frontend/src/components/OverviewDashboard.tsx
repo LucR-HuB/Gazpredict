@@ -195,7 +195,7 @@ export default function OverviewDashboard({
         <Title>Storage Forecast by Country (TWh)</Title>
         <Text>
           {overviewForecastChart.visibleCountryCount === 0
-            ? "Projected gas levels for the next two weeks."
+            ? "Projected gas levels for the available forecast horizon."
             : overviewForecastChart.hiddenCountryCount > 0
               ? `Top ${overviewForecastChart.visibleCountryCount} countries are shown individually; ${overviewForecastChart.hiddenCountryCount} countries are grouped as Others.`
               : `All ${overviewForecastChart.visibleCountryCount} countries are shown individually.`}

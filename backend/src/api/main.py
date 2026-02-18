@@ -202,12 +202,18 @@ def get_forecast() -> list[dict[str, Any]]:
 
         if "date" in df.columns:
             df["date"] = pd.to_datetime(df["date"], errors="coerce")
-        sort_columns: list[str] = [col for col in ["country", "date"] if col in df.columns]
+        sort_columns: list[str] = [col for col in ["country", "date", "scenario"] if col in df.columns]
         if sort_columns:
             df = df.sort_values(by=sort_columns)
 
-        if "net_injection_pred" in df.columns:
-            net_injection_pred = pd.to_numeric(df["net_injection_pred"], errors="coerce")
+        net_col: Optional[str] = None
+        for candidate_col in ("net_injection", "net_injection_pred"):
+            if candidate_col in df.columns:
+                net_col = candidate_col
+                break
+
+        if net_col:
+            net_injection_pred = pd.to_numeric(df[net_col], errors="coerce")
             net_injection_uncertainty = rmse * CONFIDENCE_MULTIPLIER
             df["injection_upper"] = net_injection_pred + net_injection_uncertainty
             df["injection_lower"] = net_injection_pred - net_injection_uncertainty
@@ -216,7 +222,7 @@ def get_forecast() -> list[dict[str, Any]]:
             df["injection_lower"] = None
 
         stock_col: Optional[str] = None
-        for candidate_col in ("stock_twh_simulated", "prediction_twh"):
+        for candidate_col in ("stock_twh", "stock_twh_simulated", "prediction_twh"):
             if candidate_col in df.columns:
                 stock_col = candidate_col
                 break
@@ -233,6 +239,12 @@ def get_forecast() -> list[dict[str, Any]]:
         else:
             df["stock_upper"] = None
             df["stock_lower"] = None
+
+        # Backward-compatible aliases for existing clients.
+        if stock_col and "prediction_twh" not in df.columns:
+            df["prediction_twh"] = pd.to_numeric(df[stock_col], errors="coerce")
+        if net_col and "net_injection_pred" not in df.columns:
+            df["net_injection_pred"] = pd.to_numeric(df[net_col], errors="coerce")
 
         # Backward-compatible aliases for existing clients.
         df["confidence_upper"] = df["injection_upper"]
